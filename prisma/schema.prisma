@@ -1,0 +1,412 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================
+// CORE TABLES
+// ============================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  licenses      License[]
+  payments      Payment[]
+  
+  @@map("users")
+}
+
+model License {
+  id                    String    @id @default(cuid())
+  key                   String    @unique @default(cuid())
+  userId                String
+  
+  // Device Binding
+  browserFingerprint    String?   // FingerprintJS hash
+  hardwareFingerprint   String?   // CPU + GPU + Canvas hash
+  deviceName            String?   // User-friendly name
+  
+  // Security
+  ipAddressHash         String?   // SHA256 of IP for privacy
+  lastValidatedAt       DateTime?
+  lastValidatedIp       String?
+  activationCount       Int       @default(0)
+  maxActivations        Int       @default(1) // Allow 1 device swap per month
+  
+  // Status
+  status                LicenseStatus @default(INACTIVE)
+  isActive              Boolean   @default(true)
+  isBanned              Boolean   @default(false)
+  bannedReason          String?
+  bannedAt              DateTime?
+  
+  // Metadata
+  purchasePrice         Int       // in cents/IDR
+  planType              PlanType  @default(LIFETIME)
+  expiresAt             DateTime? // NULL for lifetime
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  
+  // Relations
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  validationLogs        ValidationLog[]
+  deviceSwapLogs        DeviceSwapLog[]
+  
+  @@index([userId])
+  @@index([browserFingerprint])
+  @@index([status])
+  @@map("licenses")
+}
+
+enum LicenseStatus {
+  INACTIVE      // Belum pernah diaktifkan
+  ACTIVE        // Sedang aktif
+  SUSPENDED     // Temporary ban
+  BANNED        // Permanent ban
+  EXPIRED       // Masa berlaku habis
+}
+
+enum PlanType {
+  LIFETIME
+  ANNUAL
+  MONTHLY
+}
+
+// ============================================
+// SECURITY & LOGGING
+// ============================================
+
+model ValidationLog {
+  id                String    @id @default(cuid())
+  licenseId         String
+  
+  // Request Data
+  browserFingerprint String
+  hardwareFingerprint String?
+  ipAddress         String
+  userAgent         String
+  
+  // Result
+  result            ValidationResult
+  failureReason     String?
+  suspicionScore    Int       @default(0) // 0-100, ML-based anomaly score
+  
+  // Metadata
+  extensionVersion  String
+  createdAt         DateTime  @default(now())
+  
+  // Relations
+  license           License   @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  
+  @@index([licenseId])
+  @@index([createdAt])
+  @@index([result])
+  @@index([suspicionScore])
+  @@map("validation_logs")
+}
+
+enum ValidationResult {
+  SUCCESS
+  FAILED_INVALID_KEY
+  FAILED_DEVICE_MISMATCH
+  FAILED_BANNED
+  FAILED_EXPIRED
+  FAILED_RATE_LIMIT
+  SUSPICIOUS_ACTIVITY
+}
+
+model DeviceSwapLog {
+  id                    String    @id @default(cuid())
+  licenseId             String
+  
+  oldBrowserFingerprint String
+  newBrowserFingerprint String
+  
+  ipAddress             String
+  reason                String?   // User-provided reason
+  approvedBy            String?   // Admin ID if manual approval
+  approved              Boolean   @default(false)
+  
+  createdAt             DateTime  @default(now())
+  
+  // Relations
+  license               License   @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  
+  @@index([licenseId])
+  @@index([approved])
+  @@map("device_swap_logs")
+}
+
+// ============================================
+// REMOTE CONFIGURATION
+// ============================================
+
+model WebConfig {
+  id                String    @id @default(cuid())
+  version           String    @unique // Semantic versioning: "1.2.3"
+  
+  // Target Websites
+  vfsSelectors      Json      // CSS Selectors untuk VFS Global
+  tlsSelectors      Json      // CSS Selectors untuk TLS Contact
+  
+  // Feature Flags
+  featureFlags      Json      // {autoRetry: true, maxRetries: 5, etc}
+  
+  // Extension Compatibility
+  minExtensionVersion String  // Min version yang support config ini
+  maxExtensionVersion String? // Max version (untuk deprecation)
+  
+  // Security
+  checksum          String    // SHA256 of entire config
+  
+  // Status
+  isActive          Boolean   @default(false)
+  publishedAt       DateTime?
+  
+  // Metadata
+  changeLog         String?   // What changed in this version
+  createdBy         String?   // Admin user ID
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  
+  @@index([isActive])
+  @@index([version])
+  @@map("web_configs")
+}
+
+model ConfigDeliveryLog {
+  id                String    @id @default(cuid())
+  licenseId         String
+  configVersion     String
+  
+  extensionVersion  String
+  deliveredAt       DateTime  @default(now())
+  
+  @@index([licenseId])
+  @@index([configVersion])
+  @@map("config_delivery_logs")
+}
+
+// ============================================
+// PAYMENT & BILLING
+// ============================================
+
+model Payment {
+  id                String    @id @default(cuid())
+  userId            String
+  
+  // Payment Gateway
+  provider          PaymentProvider
+  externalId        String    // Midtrans/Xendit order ID
+  
+  // Amount
+  amount            Int       // in IDR (cents)
+  currency          String    @default("IDR")
+  
+  // Status
+  status            PaymentStatus @default(PENDING)
+  
+  // Metadata
+  planType          PlanType
+  paymentMethod     String?   // e.g., "credit_card", "gopay", "bank_transfer"
+  paidAt            DateTime?
+  
+  // Fraud Detection
+  fraudScore        Int?      // 0-100
+  fraudReason       String?
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([provider, externalId])
+  @@index([userId])
+  @@index([status])
+  @@map("payments")
+}
+
+enum PaymentProvider {
+  MIDTRANS
+  XENDIT
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  EXPIRED
+  REFUNDED
+}
+
+// ============================================
+// ANALYTICS & MONITORING
+// ============================================
+
+model UsageMetric {
+  id                String    @id @default(cuid())
+  licenseId         String
+  
+  // Metrics
+  slotChecks        Int       @default(0) // Berapa kali cek slot
+  slotsFound        Int       @default(0) // Berapa slot ditemukan
+  bookingAttempts   Int       @default(0) // Berapa kali coba booking
+  bookingSuccess    Int       @default(0) // Berapa kali sukses booking
+  
+  // Time window
+  date              DateTime  @db.Date
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  
+  @@unique([licenseId, date])
+  @@index([licenseId])
+  @@index([date])
+  @@map("usage_metrics")
+}
+
+model SystemAlert {
+  id                String    @id @default(cuid())
+  
+  // Alert Type
+  type              AlertType
+  severity          AlertSeverity
+  
+  // Details
+  title             String
+  message           String
+  metadata          Json?     // Additional context
+  
+  // Status
+  resolved          Boolean   @default(false)
+  resolvedAt        DateTime?
+  resolvedBy        String?   // Admin ID
+  
+  createdAt         DateTime  @default(now())
+  
+  @@index([type])
+  @@index([severity])
+  @@index([resolved])
+  @@map("system_alerts")
+}
+
+enum AlertType {
+  ABUSE_DETECTED
+  PAYMENT_FRAUD
+  HIGH_ERROR_RATE
+  SERVICE_DOWN
+  UNUSUAL_TRAFFIC
+  CONFIG_ERROR
+}
+
+enum AlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+// ============================================
+// ADMIN & INTERNAL
+// ============================================
+
+model AdminUser {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  role              AdminRole @default(SUPPORT)
+  
+  // Security
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  
+  @@map("admin_users")
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  SUPPORT
+}
+
+model AuditLog {
+  id                String    @id @default(cuid())
+  
+  // Actor
+  userId            String?
+  adminId           String?
+  
+  // Action
+  action            String    // e.g., "license.ban", "config.update"
+  entityType        String    // e.g., "license", "payment"
+  entityId          String
+  
+  // Details
+  changes           Json?     // Before/after values
+  ipAddress         String
+  userAgent         String
+  
+  createdAt         DateTime  @default(now())
+  
+  @@index([userId])
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================
+// RATE LIMITING (FREE TIER SOLUTION)
+// ============================================
+
+model RateLimit {
+  key       String   @id
+  count     Int      @default(0)
+  resetAt   DateTime @map("reset_at")
+  
+  // Auto-cleanup old entries
+  @@index([resetAt])
+  @@map("rate_limits")
+}
+
+// ============================================
+// MONITORING & LOGGING (FREE TIER)
+// ============================================
+
+model ErrorLog {
+  id        String   @id @default(cuid())
+  level     String   // 'error', 'warn', 'info'
+  message   String
+  context   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  @@index([createdAt])
+  @@index([level])
+  @@map("error_logs")
+}
+
+model ApiMetric {
+  id           String   @id @default(cuid())
+  endpoint     String
+  avgDuration  Float    @map("avg_duration")
+  successRate  Float    @map("success_rate")
+  requestCount Int      @map("request_count")
+  date         DateTime @db.Date
+  
+  @@unique([endpoint, date])
+  @@index([date])
+  @@map("api_metrics")
+}
+
