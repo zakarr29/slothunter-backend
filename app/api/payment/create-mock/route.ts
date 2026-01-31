@@ -67,7 +67,7 @@ export async function POST(req: NextRequest) {
             data: {
                 orderId,
                 snapToken: mockSnapToken,
-                redirectUrl: `${baseUrl}/api/payment/mock-success?order_id=${orderId}`,
+                redirectUrl: `${baseUrl}/payment/success?order_id=${orderId}`,
                 amount,
                 planType,
                 message: '⚠️ MOCK MODE: Use mock-success endpoint to simulate payment'
